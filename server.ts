@@ -1,6 +1,3 @@
-import { resolve } from "path";
-import { reject } from "bluebird";
-
 const pgPromise = require('pg-promise');
 const R = require('ramda');
 const request = require('request-promise');
@@ -20,8 +17,8 @@ interface DBOptions {
 
 // Actual database options
 const options: DBOptions = {
-  user: 'falkain',
-  password: 'lisbonlove',
+  user: '',
+  password: '',
   host: 'localhost',
   port: 5432,
   database: 'lovelystay_test',
@@ -47,7 +44,13 @@ const pgpDefaultConfig = {
 interface GithubUsers {
   id: number,
   login: string,
+  location: string,
+  email: string
+};
 
+interface Statistics {
+  location: string,
+  total_users: number
 };
 
 const pgp = pgPromise(pgpDefaultConfig);
@@ -56,45 +59,62 @@ const db = pgp(options);
 // Check if table github_users already exists. If not, create the table
 db.one("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2)", ['public', 'github_users'], c => c.exists)
   .then((exists) => {
-    console.log('DATA', exists)
-    console.log('oi')
+
     if (!exists) {
-      console.log('entrei');
-      // Table github_users with new columns and primary key defined
-      db.none('CREATE TABLE github_users (id BIGSERIAL, login TEXT, name TEXT, company TEXT, country TEXT, email TEXT, CONSTRAINT id_log PRIMARY KEY(id,login))')
+      // Table github_users with new columns (location and email), primary key (id) and unique index (login) definition embedded at table creation
+      return db.none('CREATE TABLE github_users (id BIGSERIAL, login TEXT not null CONSTRAINT ak_github_users_login UNIQUE, name TEXT, company TEXT, location TEXT, email TEXT, CONSTRAINT pk_github_users PRIMARY KEY(id))')
     }
+
   }).then(() => {
 
     return new Promise(function (resolve, _reject) {
       // Start the prompt
       promptmsg.start();
-      //
+
+      function getGithubUser() {
+        return [
+          {
+            name: 'githubuser',
+            description: 'Which github user would you like to get information ?',
+            message: 'This field is required.',
+            type: 'string',
+            require: true
+          }
+        ];
+      };
+
       // Get the github user.
-      //
-      promptmsg.get(['githubuser'], function (_err, result) {
+      promptmsg.get(getGithubUser(), function (_err, result) {
         resolve(result.githubuser);
       });
     });
 
   }).then((githubuser) => {
-    let uriUser = 'https://api.github.com/users/' + githubuser;
-    console.log(uriUser);
 
+    let uriUser = R.concat('https://api.github.com/users/', githubuser);
+
+    //Request to get github user.
     return request({
       uri: uriUser,
       headers: {
         'User-Agent': 'Request-Promise'
       },
       json: true
-    })
-  }).then((data: GithubUsers) => 
-    db.one(
-      'INSERT INTO github_users (login) VALUES ($[login]) RETURNING id', data)
-    ).then(({ id }) => console.log(id)).then(() => {
+    });
+
+  }).then((data: GithubUsers) => {
+
+    //Insert user into githug_users table.
+    return db.one(
+      'INSERT INTO github_users (login, location, email) VALUES ($[login], $[location], $[email]) RETURNING id', data);
+
+  }).then(() => {
 
     return new Promise(function (resolve) {
       // Start the prompt
       promptmsg.start();
+
+      //Function to check if it is needed show users located in Lisbon.
       function getData() {
         return [
           {
@@ -103,58 +123,85 @@ db.one("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablena
             message: 'You must to input Y or N',
             type: 'string',
             require: true,
-            conform: function(value) {
-           
-              return ((value.toLowerCase()=='y') || (value.toLowerCase()=='n'));
-            }
+            conform: function (value) {
 
+              return ((value.toLowerCase() == 'y') || (value.toLowerCase() == 'n'));
+            },
+            before: function (value) {
+
+              if (value.toLowerCase() == 'y') {
+                return true;
+              }
+
+              return false;
+            }
           }
         ];
       };
 
-
-      //
-      // Get the github user.
-      //
+      //Prompt that triggers the function getData() in order 
+      //to check if it is needed show users located in Lisbon.
       promptmsg.get(getData(), function (_err, result) {
         resolve(result.showLisbonUsers);
       });
     });
 
   }).then((showLisbonUsers) => {
-  console.log(showLisbonUsers);
 
-   // return db.many('SELECT id, login FROM github_users', null);
+    // Select to return users located in Lisbon.
+    if (showLisbonUsers) {
+      return db.each("SELECT login FROM github_users where lower(location) like $1", ['lisbo%'], row => {
+        row;
+      });
+    }
 
- return db.each('SELECT id, login FROM github_users', [], row => {
-    row ;
-});
-
-  }).then((data: GithubUsers[]) => 
+  }).then((data: GithubUsers[]) => {
   
-  data.forEach(function(element:GithubUsers) {
+    //Statistics about users located in Lisbon
+    if (data != undefined && data.length > 0) {
 
-    console.log('Id:', element.id);
-    console.log('Login:', element.login);
+      console.info('\n==========>Users located in Lisbon<==========\n')
+      console.info('Logins:\n');
+      data.forEach(function (element: GithubUsers) {
 
-  })
- 
-  
-  ).then(() => process.exit(0));
+        console.info(element.login);
 
-    //  .then((githubuser) => {
-      //db.one('INSERT INTO github_users (login) VALUES ($[login]) RETURNING id', githubuser);
-      //}).then(({id}) => console.log(id));
+      })
 
-//db.none('CREATE TABLE github_users (id BIGSERIAL, login TEXT, name TEXT, company TEXT, country VARCHAR(30), email VARCHAR(40), CONSTRAINT id_log PRIMARY KEY(id,login))')
-//.then(() => request({
-//  uri: 'https://api.github.com/users/gaearon',
-//  headers: {
-//        'User-Agent': 'Request-Promise'
-//    },
-//  json: true
-//}))
-//.then((data: GithubUsers) => db.one(
-//  'INSERT INTO github_users (login) VALUES ($[login]) RETURNING id', data)
-//).then(({id}) => console.log(id))
-//.then(() => process.exit(0));
+      console.info('\n');
+    }else{
+      console.info('\nThere are no users from Lisbon.\n');
+    }
+
+  }).then(() => {
+
+    //Return statistics about users location
+    return db.each("select coalesce(location, $1) as location, count(1) as total_users from github_users group by location order by total_users desc", ['Undefined location'], row => {
+      row;
+    })
+
+  }).then(data => {
+
+    if (data != undefined && data.length>0) {
+      console.info('\n==========>Users location statistic<==========\n')
+      data.forEach(function (element: Statistics) {
+
+        console.info('\n');
+        console.info('Location:', element.location);
+        console.info('Total Users:', element.total_users);
+        console.info('\n');
+
+      })
+
+      console.info('\n');
+    }else{
+
+      console.info('\nThere is no data to provide statistics.\n');
+
+    }
+
+  }).catch((err) => {
+    console.error('The following error has been raised:\n')
+    console.error(err.message);
+
+  }).finally(() => process.exit(0))
